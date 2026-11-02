@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# ClipHunter outputs and local scratch data
+/clips/
+/demo/
+/_phase*/
+/_e2e*/
+/_live*/
+/_test_data/
+/_*.py
+*.log
+analysis.json
+clips.json
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+.venv/
+.env
+__pycache__/
+*.pyc
+output/
+*.mp4

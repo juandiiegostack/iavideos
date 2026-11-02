@@ -1,0 +1,305 @@
+# ClipHunter default configuration.
+# Copy this file, edit it, and pass it with --config my.yaml
+
+analysis:
+  window: 10.0        # sliding window length in seconds
+  hop: 2.0            # step between windows in seconds
+  signals:
+    chat: true
+    audio: true
+    transcript: true
+
+weights:
+  chat: 0.40
+  audio: 0.35
+  transcript: 0.25
+
+chat:
+  min_messages: 20
+  moving_average_seconds: 90
+  max_messages: 500000
+  timeout: 600
+  # Emotes are matched case-sensitively as whole tokens.
+  emotes:
+    - KEKW
+    - LUL
+    - LULW
+    - OMEGALUL
+    - PogChamp
+    - Pog
+    - POGGERS
+    - PogU
+    - Kappa
+    - monkaS
+    - monkaW
+    - EZ
+    - Clap
+    - PepeHands
+    - PepeLaugh
+    - catJAM
+    - HYPERS
+    - 5Head
+    - Sadge
+    - BibleThump
+    - ResidentSleeper
+    - WutFace
+    - TriHard
+    - DansGame
+    - NotLikeThis
+    - Jebaited
+    - VoHiYo
+    - Gasm
+    - Kreygasm
+    - SeemsGood
+    - 4Head
+    - BabyRage
+    - cmonBruh
+    - WeirdChamp
+    - Okayge
+    - ICANT
+    - NODDERS
+    - Clueless
+    - Aware
+    - YEP
+    - COPIUM
+    - HOPIUM
+    - GIGACHAD
+    - xqcL
+    - OMEGALULiguess
+    - HUH
+    - WHAT
+  # Extra hype words in chat (lowercase, substring-free token match).
+  hype_words:
+    - clutch
+    - insane
+    - no way
+    - omg
+    - gg
+    - ez
+    - clip
+    - clip it
+    - clipit
+    - pog
+    - xdd
+    - jajaja
+    - jaja
+    - lol
+    - lmao
+    - wtf
+    - bruh
+    - hype
+
+audio:
+  sample_rate: 16000
+  frame_ms: 64
+  hop_ms: 32
+  db_floor: -60
+  quiet_db: -42
+  scream_band_hz: [2500, 7500]
+  laughter_band_hz: [3, 9]
+  # Weight of the "sudden loudness" novelty component.
+  novelty: 0.35
+  scream: 0.15
+  laughter: 0.10
+
+transcript:
+  model: small
+  device: auto           # auto | cpu | cuda
+  compute_type: auto     # auto | int8 | int8_float16 | float16 | float32
+  language: null         # null = autodetect, or "es", "en"...
+  beam_size: 5
+  vad_filter: true
+  condition_on_previous_text: false
+  keywords:
+    es:
+      - no puede ser
+      - no me lo puedo creer
+      - increíble
+      - increible
+      - qué locura
+      - que locura
+      - brutal
+      - épico
+      - epico
+      - clutch
+      - ace
+      - gg
+      - jajaja
+      - jaja
+      - xdd
+      - nooo
+      - noo
+      - wow
+      - oh dios
+      - por favor
+      - madre mía
+      - madre mia
+      - qué hace
+      - que hace
+      - cómo
+      - como
+      - mira esto
+      - esto es
+      - vamos
+      - bestia
+      - salvaje
+      - gol
+      - ganó
+      - gano
+      - perdió
+      - perdio
+      - trampa
+      - wtf
+      - risas
+      - grito
+      - rip
+      - casi
+      - por poco
+      - mirad
+      - tío
+      - tio
+      - hostia
+      - joder
+      - buah
+      - uff
+      - ostia
+      - lo logró
+      - lo logro
+      - se viene
+      - atención
+      - atencion
+      - cuidado
+      - goool
+      - increíblemente
+      - impresionante
+      - locura
+      - récord
+      - record
+      - hostia puta
+      - qué fuerte
+      - que fuerte
+      - no jodas
+      - flipa
+      - flipando
+    en:
+      - no way
+      - what
+      - what the
+      - insane
+      - crazy
+      - unbelievable
+      - clutch
+      - ace
+      - gg
+      - lol
+      - lmao
+      - wtf
+      - omg
+      - oh my god
+      - holy
+      - holy shit
+      - let's go
+      - lets go
+      - nice
+      - wow
+      - bro
+      - dude
+      - are you kidding
+      - how
+      - did you see
+      - look at this
+      - rip
+      - almost
+      - so close
+      - unlucky
+      - lucky
+      - perfect
+      - beautiful
+      - amazing
+      - screaming
+      - laughing
+      - hahaha
+      - hehe
+      - xd
+      - pog
+      - poggers
+      - game over
+      - won
+      - lost
+      - no no no
+      - wait
+      - stop
+      - what happened
+      - oh no
+      - yes
+      - yess
+      - finally
+      - world record
+      - record
+      - incredible
+      - epic
+      - nasty
+      - clipped
+      - clip that
+
+scoring:
+  peak_threshold: 0.42       # normalized score needed to consider a peak
+  relative_threshold: 0.35   # fallback: fraction of the highest peak
+  min_peak_distance: 12.0    # seconds between separate peaks
+  merge_distance: 8.0        # peaks closer than this are merged
+  max_overlap: 0.0           # 0.0 = clips may not overlap at all
+  smoothing_frames: 2
+  low_percentile: 10
+  high_percentile: 95
+
+selection:
+  clips: 10
+  min_duration: 15.0
+  max_duration: 60.0
+  pre_roll: 8.0
+  post_roll: 4.0
+  silence_snap: 3.0
+
+export:
+  codec: libx264
+  preset: veryfast
+  crf: 20
+  audio_bitrate: 192k
+  workers: 2
+  vertical: false
+  vertical_mode: blur        # blur | crop
+  vertical_blur: 28
+  vertical_brightness: -0.06
+  max_width: 1920
+
+subtitles:
+  enabled: false
+  mode: word                # word | chunk
+  font: Arial Black
+  font_size_horizontal: 56
+  font_size_vertical: 104
+  margin_v_horizontal: 40
+  margin_v_vertical: 340
+  max_words: 4
+  max_chars: 30
+  max_duration: 3.0
+  highlight_color: "&H00FFFF&"   # ASS BGR: yellow
+  outline: 7
+  shadow: 2
+  bold: true
+
+llm:
+  enabled: false
+  # Any OpenAI-compatible endpoint. Values are overridden by env vars:
+  # CLIPHUNTER_LLM_BASE_URL, CLIPHUNTER_LLM_API_KEY, CLIPHUNTER_LLM_MODEL
+  base_url: ""
+  api_key: ""
+  model: ""
+  timeout: 60
+  temperature: 0.4
+  weight: 0.30              # blend with heuristic score (0 = ignore LLM ranking)
+  max_candidates: 12
+
+paths:
+  cache_dir: null           # null = OS cache dir (LOCALAPPDATA or ~/.cache)
+  output_dir: clips

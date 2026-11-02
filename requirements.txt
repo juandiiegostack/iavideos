@@ -1,0 +1,15 @@
+# ClipHunter runtime dependencies.
+# ffmpeg + ffprobe are external tools and are NOT installed with pip:
+#   Windows: winget install Gyan.FFmpeg
+#   macOS:   brew install ffmpeg
+#   Linux:   sudo apt install ffmpeg
+
+yt-dlp>=2025.1.1
+streamlink>=7.0.0
+numpy>=1.26
+rich>=13.7
+PyYAML>=6.0
+python-dotenv>=1.0
+requests>=2.31
+chat-downloader>=0.2.8
+faster-whisper>=1.1.0
