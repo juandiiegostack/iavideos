@@ -18,15 +18,25 @@ def _clip_window(
     peak: float,
     duration: float,
     config: Config,
+    range_start: float = 0.0,
+    range_end: float | None = None,
 ) -> tuple[float, float]:
-    """Build a window around a peak respecting pre/post roll and min/max length."""
+    """Build a window around a peak respecting pre/post roll and min/max length.
+
+    ``range_start``/``range_end`` keep clips inside an optional analysis range
+    while all returned timestamps remain relative to the original video.
+    """
     pre = config.f("selection.pre_roll", 8.0)
     post = config.f("selection.post_roll", 4.0)
     min_dur = config.f("selection.min_duration", 15.0)
     max_dur = config.f("selection.max_duration", 60.0)
 
-    if duration <= min_dur:
-        return 0.0, duration
+    low = max(0.0, min(float(range_start), float(duration)))
+    high = float(duration) if range_end is None else min(float(duration), float(range_end))
+    high = max(low, high)
+    span = high - low
+    if span <= min_dur:
+        return low, high
 
     start = peak - pre
     end = peak + post
@@ -36,19 +46,19 @@ def _clip_window(
         start = peak - max_dur / 2.0
         end = start + max_dur
 
-    if start < 0:
-        end = min(duration, end - start)
-        start = 0.0
-    if end > duration:
-        start = max(0.0, start - (end - duration))
-        end = duration
+    if start < low:
+        end = min(high, end + (low - start))
+        start = low
+    if end > high:
+        start = max(low, start - (end - high))
+        end = high
 
     if end - start < min_dur:
-        if start <= 1e-6:
-            end = min(duration, min_dur)
+        if start <= low + 1e-6:
+            end = min(high, low + min_dur)
         else:
-            start = max(0.0, end - min_dur)
-    return max(0.0, start), min(duration, end)
+            start = max(low, end - min_dur)
+    return max(low, start), min(high, end)
 
 
 def _snap_to_silence(
@@ -58,6 +68,8 @@ def _snap_to_silence(
     duration: float,
     signal: SignalSeries | None,
     config: Config,
+    range_start: float = 0.0,
+    range_end: float | None = None,
 ) -> tuple[float, float]:
     """Move clip boundaries to nearby quiet points when that stays valid."""
     if signal is None or signal.envelope_times is None or signal.envelope_db is None:
@@ -71,6 +83,9 @@ def _snap_to_silence(
     quiet_db = config.f("audio.quiet_db", -42.0)
     min_dur = config.f("selection.min_duration", 15.0)
     max_dur = config.f("selection.max_duration", 60.0)
+    low = max(0.0, min(float(range_start), float(duration)))
+    high = float(duration) if range_end is None else min(float(duration), float(range_end))
+    high = max(low, high)
 
     local_min = (env_db <= np.roll(env_db, 1)) & (env_db <= np.roll(env_db, -1))
     local_min[0] = local_min[-1] = False
@@ -90,14 +105,24 @@ def _snap_to_silence(
         return float(options[np.argmin(np.abs(options - target))])
 
     new_start = nearest(start)
-    if new_start is not None and new_start <= peak - 2.0 and end - new_start >= min_dur:
-        start = max(0.0, new_start)
+    if (
+        new_start is not None
+        and new_start >= low
+        and new_start <= peak - 2.0
+        and end - new_start >= min_dur
+    ):
+        start = max(low, new_start)
     new_end = nearest(end)
-    if new_end is not None and new_end >= peak + 2.0 and new_end - start >= min_dur:
-        end = min(duration, new_end)
+    if (
+        new_end is not None
+        and new_end <= high
+        and new_end >= peak + 2.0
+        and new_end - start >= min_dur
+    ):
+        end = min(high, new_end)
     if end - start > max_dur:
-        start, end = _clip_window(peak, duration, config)
-    return start, end
+        start, end = _clip_window(peak, duration, config, low, high)
+    return max(low, start), min(high, end)
 
 
 def _window_slice(times: np.ndarray, start: float, end: float) -> slice:
@@ -206,7 +231,140 @@ def _reasons(
             reasons.append(f"transcripción: {quoted}")
         else:
             reasons.append("transcripción: habla acelerada")
+
+    query = signals.get("query")
+    if query is not None and query.available:
+        detail = query.detail
+        hits = detail.get("hits") or []
+        inside = []
+        for item in hits:
+            try:
+                time, label, weight = float(item[0]), str(item[1]), float(item[2])
+            except (IndexError, TypeError, ValueError):
+                continue
+            if start <= time <= end:
+                inside.append((label, weight))
+        if inside:
+            counts: Counter[str] = Counter()
+            for label, weight in inside:
+                counts[label] += weight
+            labels = [label for label, _ in counts.most_common(3)]
+            quoted = ", ".join(f"«{label}»" for label in labels)
+            reasons.append(f"búsqueda: {quoted}")
+        else:
+            semantic = detail.get("semantic")
+            try:
+                semantic_values = np.asarray(semantic, dtype=np.float64)
+                if len(semantic_values) and float(np.max(semantic_values[slc])) > 0.0:
+                    reasons.append("búsqueda: relevancia semántica (LLM)")
+            except (IndexError, TypeError, ValueError):
+                pass
     return reasons, breakdown
+
+
+def _pause_boundaries(
+    transcript: TranscriptData | None,
+    range_start: float,
+    range_end: float,
+    config: Config,
+) -> list[float]:
+    """Natural cut points from word/segment gaps inside the analysis range."""
+    boundaries = {range_start, range_end}
+    if transcript is None:
+        return sorted(boundaries)
+
+    words = sorted(
+        (
+            word
+            for word in transcript.words
+            if word.end >= range_start and word.start <= range_end
+        ),
+        key=lambda word: word.start,
+    )
+    pause = max(0.1, config.f("query.pause_threshold", 0.35))
+    for previous, current in zip(words, words[1:]):
+        gap = float(current.start) - float(previous.end)
+        if gap >= pause:
+            boundaries.add((float(previous.end) + float(current.start)) / 2.0)
+
+    segments = sorted(
+        (
+            segment
+            for segment in transcript.segments
+            if segment.end >= range_start and segment.start <= range_end
+        ),
+        key=lambda segment: segment.start,
+    )
+    for previous, current in zip(segments, segments[1:]):
+        gap = float(current.start) - float(previous.end)
+        if gap >= pause:
+            boundaries.add((float(previous.end) + float(current.start)) / 2.0)
+    return sorted(
+        boundary
+        for boundary in boundaries
+        if range_start - 1e-6 <= boundary <= range_end + 1e-6
+    )
+
+
+def _query_clip_window(
+    anchor: float,
+    duration: float,
+    transcript: TranscriptData | None,
+    config: Config,
+    range_start: float,
+    range_end: float,
+) -> tuple[float, float]:
+    """Expand a query hit to a 30-40 s clip, cutting on natural pauses."""
+    min_dur = config.f("query.min_duration", 30.0)
+    max_dur = config.f("query.max_duration", 40.0)
+    target = config.f("query.target_duration", 35.0)
+    target = min(max(target, min_dur), max_dur)
+    low = max(0.0, min(float(range_start), float(duration)))
+    high = float(duration) if range_end is None else min(float(duration), float(range_end))
+    high = max(low, high)
+    if high - low <= min_dur:
+        return low, high
+
+    boundaries = _pause_boundaries(transcript, low, high, config)
+    desired_start = min(max(anchor - target / 2.0, low), max(low, high - target))
+    desired_end = min(high, desired_start + target)
+    snap = max(0.0, config.f("query.snap_window", 4.0))
+
+    starts = sorted(set(boundaries + [desired_start, low]))
+    ends = sorted(set(boundaries + [desired_end, high]))
+    best: tuple[float, float, float] | None = None
+    for start in starts:
+        if start < low - 1e-6 or start > high:
+            continue
+        if start not in {low, desired_start} and abs(start - desired_start) > snap:
+            continue
+        for end in ends:
+            if end > high + 1e-6 or end <= start:
+                continue
+            if end not in {high, desired_end} and abs(end - desired_end) > snap:
+                continue
+            length = end - start
+            if length < min_dur - 1e-6 or length > max_dur + 1e-6:
+                continue
+            if not start - 1e-6 <= anchor <= end + 1e-6:
+                continue
+            cost = (
+                abs(start - desired_start)
+                + abs(end - desired_end)
+                + 0.25 * abs(length - target)
+            )
+            if best is None or cost < best[0]:
+                best = (cost, start, end)
+
+    if best is not None:
+        return best[1], best[2]
+
+    # No pause fits: keep a target-sized window and clamp it to the range.
+    start = desired_start
+    end = min(high, start + target)
+    if end - start < min_dur:
+        start = max(low, end - min_dur)
+    return start, end
 
 
 def score_and_select(
@@ -214,10 +372,20 @@ def score_and_select(
     transcript: TranscriptData | None,
     duration: float,
     config: Config,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
 ) -> AnalysisResult:
-    """Normalize signals, combine them, and pick the best non-overlapping clips."""
+    """Normalize signals, combine them, and pick the best non-overlapping clips.
+
+    ``start``/``end`` restrict peaks and clip windows to a section, while all
+    clip timestamps remain relative to the original video.
+    """
     hop = config.f("analysis.hop", 2.0)
-    times = analysis_times(duration, hop)
+    range_start = max(0.0, min(float(start), float(duration)))
+    range_end = float(duration) if end is None else min(float(duration), float(end))
+    range_end = max(range_start, range_end)
+    times = analysis_times(range_end - range_start, hop, offset=range_start)
     low_p = config.f("scoring.low_percentile", 10.0)
     high_p = config.f("scoring.high_percentile", 95.0)
     smooth = max(1, config.i("scoring.smoothing_frames", 2))
@@ -225,6 +393,8 @@ def score_and_select(
     normalized: dict[str, np.ndarray] = {}
     usable: dict[str, np.ndarray] = {}
     weight_map = {k: float(v) for k, v in config.section("weights").items() if isinstance(v, (int, float))}
+    if "query" in signals:
+        weight_map["query"] = max(0.0, config.f("query_weight", 0.20))
 
     for name, signal in signals.items():
         if not signal.available:
@@ -285,34 +455,76 @@ def score_and_select(
     envelope_signal = audio if audio is not None and audio.available else None
     min_peak_distance = config.f("scoring.min_peak_distance", 12.0)
     max_overlap = config.f("scoring.max_overlap", 0.0)
+    query_signal = signals.get("query")
+    query_active = query_signal is not None and query_signal.available
 
-    accepted: list[tuple[float, float, float, int]] = []
-    for idx in merged:
-        if len(accepted) >= wanted:
-            break
-        peak = float(times[idx])
-        peak_score = float(combined[idx])
-        start, end = _clip_window(peak, duration, config)
-        start, end = _snap_to_silence(start, end, peak, duration, envelope_signal, config)
-        if any(abs(peak - p) < min_peak_distance for _, _, p, _ in accepted):
-            continue
-        overlap = False
-        for s, e, _, _ in accepted:
-            inter = max(0.0, min(end, e) - max(start, s))
-            shorter = max(1e-6, min(end - start, e - s))
+    def _overlaps(candidate: tuple[float, float], accepted: list[tuple[float, float, float, int, float]]) -> bool:
+        start, end = candidate
+        for other_start, other_end, _, _, _ in accepted:
+            inter = max(0.0, min(end, other_end) - max(start, other_start))
+            shorter = max(1e-6, min(end - start, other_end - other_start))
             if inter / shorter > max_overlap + 1e-6:
-                overlap = True
-                break
-        if overlap:
-            continue
-        accepted.append((start, end, peak, idx))
+                return True
+        return False
 
-    accepted.sort(key=lambda item: -combined[item[3]])
+    accepted: list[tuple[float, float, float, int, float]] = []
+    if query_active and query_signal is not None:
+        # Query mode: every clip must grow from a matching transcript moment,
+        # then expand to 30-40 s on natural pauses without overlapping.
+        raw_anchors = list(query_signal.detail.get("anchors") or [])
+        anchors: list[tuple[float, float, str]] = []
+        for item in raw_anchors:
+            try:
+                anchors.append((float(item[0]), float(item[2]), str(item[1])))
+            except (IndexError, TypeError, ValueError):
+                continue
+        anchors.sort(key=lambda item: -item[1])
+        for center, anchor_score, _label in anchors:
+            if len(accepted) >= wanted:
+                break
+            if not range_start - 1e-6 <= center <= range_end + 1e-6:
+                continue
+            clip_start, clip_end = _query_clip_window(
+                center, duration, transcript, config, range_start, range_end
+            )
+            if _overlaps((clip_start, clip_end), accepted):
+                continue
+            idx = int(np.argmin(np.abs(times - center)))
+            accepted.append((clip_start, clip_end, center, idx, anchor_score))
+        if not accepted:
+            LOG.warning(
+                "La búsqueda no encontró fragmentos utilizables en el rango analizado."
+            )
+    else:
+        for idx in merged:
+            if len(accepted) >= wanted:
+                break
+            peak = float(times[idx])
+            start, end = _clip_window(peak, duration, config, range_start, range_end)
+            start, end = _snap_to_silence(
+                start,
+                end,
+                peak,
+                duration,
+                envelope_signal,
+                config,
+                range_start,
+                range_end,
+            )
+            if any(abs(peak - p) < min_peak_distance for _, _, p, _, _ in accepted):
+                continue
+            if _overlaps((start, end), accepted):
+                continue
+            accepted.append((start, end, peak, idx, 0.0))
+
+    accepted.sort(key=lambda item: -(combined[item[3]] + item[4]))
     clips: list[CandidateClip] = []
-    for rank, (start, end, peak, idx) in enumerate(accepted, start=1):
+    for rank, (start, end, peak, idx, anchor_score) in enumerate(accepted, start=1):
         slc = _window_slice(times, start, end)
         clip_mean = float(np.mean(combined[slc])) if len(combined[slc]) else float(combined[idx])
         score = 0.7 * float(combined[idx]) + 0.3 * clip_mean
+        if query_active:
+            score = 0.60 * score + 0.40 * float(anchor_score)
         reasons, breakdown = _reasons(
             start, end, times, normalized, signals, transcript, config
         )

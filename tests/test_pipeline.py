@@ -7,8 +7,8 @@ import pytest
 from cliphunter.cache import Cache
 from cliphunter.config import load_config
 from cliphunter.downloader import RemoteSource, SourceSpec
-from cliphunter.exceptions import SourceError
-from cliphunter.pipeline import RunOptions, _resolve_source
+from cliphunter.exceptions import ClipHunterError, SourceError
+from cliphunter.pipeline import RunOptions, _resolve_analysis_range, _resolve_source
 
 
 class DummyProgress:
@@ -58,3 +58,25 @@ def test_live_mode_offline_channel_reports_offline(
     cache = Cache(tmp_path / "cache", enabled=False)
     with pytest.raises(LiveOfflineError):
         _resolve_source(options, load_config(), cache, DummyProgress())
+
+
+def test_resolve_analysis_range_rejects_start_not_before_end() -> None:
+    with pytest.raises(ClipHunterError) as info:
+        _resolve_analysis_range(RunOptions(start=30.0, end=20.0), 120.0)
+    assert "--start debe ser menor que --end" in str(info.value)
+
+
+def test_resolve_analysis_range_rejects_start_out_of_range() -> None:
+    with pytest.raises(ClipHunterError) as info:
+        _resolve_analysis_range(RunOptions(start=130.0, end=140.0), 120.0)
+    assert "está fuera del video" in str(info.value)
+
+
+def test_resolve_analysis_range_defaults_to_whole_video() -> None:
+    assert _resolve_analysis_range(RunOptions(), 120.0) == (0.0, 120.0)
+
+
+def test_resolve_analysis_range_clamps_end_to_duration() -> None:
+    start, end = _resolve_analysis_range(RunOptions(start=10.0, end=999.0), 120.0)
+    assert start == 10.0
+    assert end == 120.0

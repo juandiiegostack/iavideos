@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from cliphunter.config import load_config
 from cliphunter.models import (
@@ -10,8 +11,15 @@ from cliphunter.models import (
     TranscriptSegment,
     Word,
 )
-from cliphunter.scorer import _clip_window, _fallback_title, _snap_to_silence, score_and_select
+from cliphunter.scorer import (
+    _clip_window,
+    _fallback_title,
+    _query_clip_window,
+    _snap_to_silence,
+    score_and_select,
+)
 from cliphunter.signals.base import analysis_times
+from cliphunter.models import TranscriptData, TranscriptSegment, Word
 
 
 def _series(name: str, duration: float, peaks: list[tuple[float, float]]) -> SignalSeries:
@@ -138,3 +146,89 @@ def test_candidate_clip_duration_property() -> None:
     clip = CandidateClip(index=1, start=10.0, end=25.5, peak=12.0, score=0.5)
     assert clip.duration == 15.5
     assert clip.to_dict()["duration"] == 15.5
+
+
+def _query_signal(duration: float, anchors: list[tuple[float, str, float]]) -> SignalSeries:
+    times = analysis_times(duration, 2.0)
+    values = np.zeros(len(times), dtype=np.float32)
+    values[int(np.argmin(np.abs(times - anchors[0][0])))] = 1.0
+    return SignalSeries(
+        "query",
+        times,
+        values,
+        True,
+        "búsqueda: tema",
+        detail={"anchors": anchors, "hits": [], "semantic": None},
+    )
+
+
+def _speech_transcript(duration: float = 120.0) -> TranscriptData:
+    words = [
+        Word(start=start, end=start + 0.25, text=text, probability=0.9)
+        for start, text in [
+            (0.0, "hola"),
+            (5.0, "mundo"),
+            (30.0, "nace"),
+            (35.0, "ganga"),
+        ]
+    ]
+    segments = [TranscriptSegment(0.0, 35.25, " ".join(w.text for w in words))]
+    return TranscriptData(words=words, segments=segments, language="es", duration=duration, model="test")
+
+
+def test_query_mode_selects_clip_around_anchor() -> None:
+    config = load_config()
+    result = score_and_select(
+        {"query": _query_signal(120.0, [(50.0, "ganga", 0.9)])},
+        _speech_transcript(),
+        120.0,
+        config,
+    )
+    assert result.clips
+    clip = result.clips[0]
+    assert clip.start <= 50.0 <= clip.end
+    assert 30.0 <= clip.duration <= 40.0
+    assert 0.0 <= clip.start < clip.end <= 120.0
+
+
+def test_query_mode_clips_do_not_overlap() -> None:
+    config = load_config()
+    result = score_and_select(
+        {
+            "query": _query_signal(
+                120.0, [(50.0, "ganga", 0.9), (110.0, "ganga", 0.8)]
+            )
+        },
+        _speech_transcript(),
+        120.0,
+        config,
+    )
+    assert len(result.clips) == 2
+    first, second = result.clips[0], result.clips[1]
+    overlap = max(0.0, min(first.end, second.end) - max(first.start, second.start))
+    shorter = min(first.duration, second.duration)
+    assert overlap / shorter <= 1e-6
+
+
+def test_query_signal_respects_query_weight() -> None:
+    config = load_config(overrides={"query_weight": 0.0})
+    result = score_and_select(
+        {"query": _query_signal(120.0, [(50.0, "ganga", 0.9)])},
+        _speech_transcript(),
+        120.0,
+        config,
+    )
+    assert result.clips == []
+
+
+def test_query_clip_window_cuts_on_natural_pause() -> None:
+    transcript = _speech_transcript()
+    config = load_config()
+    start, end = _query_clip_window(25.0, 120.0, transcript, config, 0.0, 120.0)
+    # The clip is expanded around the anchor to the configured target duration
+    # (35 s) and stays inside the analysis range.
+    assert start == pytest.approx(7.5, abs=1e-6)
+    assert end == pytest.approx(42.5, abs=1e-6)
+    assert end - start >= 30.0
+    assert end - start <= 40.0
+    assert start - 1e-6 <= 25.0 <= end + 1e-6

@@ -5,14 +5,18 @@ from __future__ import annotations
 import numpy as np
 
 
-def analysis_times(duration: float, hop: float) -> np.ndarray:
-    """Window centers covering ``[0, duration]`` with a fixed step."""
+def analysis_times(duration: float, hop: float, offset: float = 0.0) -> np.ndarray:
+    """Window centers covering ``[offset, offset + duration]`` with a fixed step.
+
+    ``offset`` keeps timestamps relative to the original source when only a
+    section of a video is analyzed.
+    """
     if duration <= 0 or hop <= 0:
         return np.zeros(0, dtype=np.float32)
     count = int(np.floor(duration / hop)) + 1
-    times = np.arange(count, dtype=np.float64) * hop
-    if times[-1] < duration - 1e-6:
-        times = np.append(times, duration)
+    times = np.arange(count, dtype=np.float64) * hop + offset
+    if times[-1] < offset + duration - 1e-6:
+        times = np.append(times, offset + duration)
     return times.astype(np.float32)
 
 

@@ -49,6 +49,12 @@ eligió cada momento (score, señales, motivos, título y transcripción).
     (modulación de 3–9 Hz). Decodifica con ffmpeg + NumPy, sin librosa.
   - **Transcripción**: `faster-whisper` con timestamps por palabra, palabras clave
     ES/EN y cambios de velocidad del habla. CUDA automática si está disponible.
+  - **Búsqueda por tema**: `--query "texto"` detecta fragmentos que hablan del tema
+    usando la transcripción de Whisper (coincidencias de palabras clave y, con
+    `--llm`, relevancia semántica) y expande cada hit a un clip de 30–40 s.
+- **Rango de tiempo**: `--start` y `--end` (formato `SS`, `MM:SS` o `HH:MM:SS`) analizan
+  solo ese tramo del video; los timestamps de `clips.json` siguen referidos al video
+  original.
 - **Selección**: ventana deslizante, normalización robusta, picos locales,
   supresión de no-máximos, clips no solapados, límites de duración, pre/post roll y
   ajuste a silencios.
@@ -222,6 +228,33 @@ python cliphunter.py "https://www.youtube.com/watch?v=XXXXXXXXXXX" --dry-run
 Escribe `analysis.json` con las señales y los momentos candidatos, pero no genera
 vídeos.
 
+### Analizar un tramo del video (`--start` / `--end`)
+
+```bash
+python cliphunter.py "https://twitch.tv/videos/123456789" --start 120 --end 300 --clips 5
+```
+
+`--start` y `--end` aceptan los formatos `SS`, `MM:SS` o `HH:MM:SS`
+(por ejemplo `--start 1:30` = 90 s, `--end 00:05:30` = 330 s). Solo se analiza ese
+tramo y los clips generados salen referenciados al video original.
+
+### Buscar por tema (`--query`)
+
+```bash
+python cliphunter.py "https://twitch.tv/videos/123456789" --query "de dónde nace la ganga" --clips 3
+```
+
+Usa la transcripción de Whisper para localizar los fragmentos donde se habla del tema.
+Con `--llm` activado, la relevancia semántica se suma a las coincidencias de palabras
+clave; cada hit se expande a un clip de 30–40 s cortando en pausas naturales y sin
+solapes.
+
+### Combinar tramo y tema
+
+```bash
+python cliphunter.py --file partida.mp4 --start 30 --end 120 --query "el primer round" --clips 3
+```
+
 ### Clips verticales con subtítulos y LLM
 
 ```bash
@@ -263,13 +296,16 @@ python cliphunter.py "https://twitch.tv/videos/123456789" --cookies cookies.txt
 3. **Análisis**
    - Cada señal se calcula en una rejilla temporal común (`window=10 s`,
      `hop=2 s`), se suaviza y se normaliza por percentiles.
-   - Se combinan con pesos (`chat 0.40`, `audio 0.35`, `transcript 0.25`).
+   - Se combinan con pesos (`chat 0.40`, `audio 0.35`, `transcript 0.25`) y, con
+     `--query`, el peso `query_weight` para la señal de tema.
 4. **Selección**
    - Picos locales por encima del umbral; si faltan candidatos se usa un umbral
      relativo al mejor pico.
    - Se fusionan picos cercanos, se descartan solapamientos y se respetan
      `--min-dur`/`--max-dur`.
    - Los cortes se ajustan a puntos silenciosos cercanos cuando es posible.
+   - Con `--query`, los clips se generan desde los hits del tema (expansión a 30–40 s
+     en pausas naturales) en lugar de partir de picos heurísticos.
 5. **Exportación**
    - Se recorta con re-encode (preciso, no keyframe) y se compone el vertical.
    - Se generan subtítulos ASS con la palabra activa resaltada.
@@ -303,6 +339,21 @@ python cliphunter.py "https://twitch.tv/videos/123456789" --cookies cookies.txt
 - Picos de velocidad del habla (habla acelerada = emoción).
 - El texto del clip se guarda en `clips.json` y se usa para títulos y subtítulos.
 
+### Búsqueda por tema (query)
+
+Con `--query "texto"` se activa una cuarta señal (`query`) sobre la transcripción:
+
+- Coincidencias de palabras clave normalizadas (con stemming simple para
+  plurales/conjugaciones) dentro de la ventana de análisis.
+- Si `--llm` está activo, se puntúan los fragmentos (pasajes) por relevancia semántica
+  al tema y se combina con las coincidencias.
+- El score final se suma a las demás señales con el peso configurable
+  `query_weight` en `config.yaml` (0.20 por defecto).
+
+Cada hit se expande a un clip de 30–40 s (`query.target_duration`, ajustado entre
+`query.min_duration` y `query.max_duration`) cortando en las pausas naturales del
+habla y sin solapar clips entre sí.
+
 ### Pesos
 
 En `config.yaml`:
@@ -312,6 +363,21 @@ weights:
   chat: 0.40
   audio: 0.35
   transcript: 0.25
+
+query_weight: 0.20   # peso de la señal de búsqueda por tema
+
+query:
+  window: 20.0         # segundos de contexto alrededor de un hit para puntuar
+  pause_threshold: 0.35 # segundos de silencio que separan frases distintas
+  min_score: 0.15      # relevancia mínima para fijar un ancla
+  merge_distance: 6.0  # segundos: hits cercanos se consideran el mismo clip
+  target_duration: 35.0 # duración objetivo del clip expandido desde un hit
+  min_duration: 30.0   # duración mínima del clip de búsqueda
+  max_duration: 40.0   # duración máxima del clip de búsqueda
+
+scoring:
+  peak_threshold: 0.42
+  ...
 ```
 
 Si una señal no está disponible, su peso se reparte automáticamente entre las
@@ -349,6 +415,18 @@ python cliphunter.py [URL | --file ARCHIVO] [opciones]
 | `--post-roll SEG` | `4` | Segundos después del pico. |
 | `--window SEG` | `10` | Ventana de análisis. |
 | `--hop SEG` | `2` | Paso entre ventanas. |
+
+### Búsqueda y rango
+
+| Opción | Defecto | Descripción |
+|---|---|---|
+| `--start SEG` | `0` | Inicio del análisis: `SS`, `MM:SS` o `HH:MM:SS`. |
+| `--end SEG` | duración del video | Fin del análisis: `SS`, `MM:SS` o `HH:MM:SS`. |
+| `--query TEXTO` | off | Busca un tema en la transcripción (p. ej. `--query "de dónde nace la ganga"`). |
+
+`--start` debe ser menor que `--end` y ambos se validan contra la duración real del
+video. Cuando se usa `--query`, cada coincidencia se expande a un clip de 30–40 s y se
+prioriza sobre la detección heurística.
 
 ### Señales
 
@@ -409,9 +487,23 @@ Secciones principales:
 analysis:
   window: 10.0
   hop: 2.0
-  signals: { chat: true, audio: true, transcript: true }
+  signals: { chat: true, audio: true, transcript: true, query: true }
 
 weights: { chat: 0.40, audio: 0.35, transcript: 0.25 }
+
+query_weight: 0.20   # peso de la señal de búsqueda por tema
+
+query:
+  window: 20.0
+  pause_threshold: 0.35
+  min_score: 0.15
+  merge_distance: 6.0
+  target_duration: 35.0
+  min_duration: 30.0
+  max_duration: 40.0
+  snap_window: 4.0
+  llm_max_passages: 40
+  llm_batch: 10
 
 scoring:
   peak_threshold: 0.42
@@ -750,6 +842,7 @@ cliphunter/
     chat.py                   # ritmo, emotes, hype
     audio.py                  # RMS, gritos, risas
     transcript.py             # Whisper + palabras clave
+    query.py                  # búsqueda por tema (--query)
 scripts/make_demo_media.py    # demo sintética offline
 tests/                        # pytest (unitarias + integración ffmpeg)
 requirements.txt

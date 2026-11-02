@@ -213,6 +213,45 @@ def probe_duration(path: str | Path) -> float:
     return probe_media(path).duration
 
 
+_TIME_PART_RE = re.compile(r"^\d+(?:\.\d+)?$")
+
+
+def parse_timestamp(value: str) -> float:
+    """Parse ``SS``, ``MM:SS`` or ``HH:MM:SS`` into seconds.
+
+    Decimal seconds are accepted (``"1:30.5"``). Colon-separated minute and
+    second parts must be lower than 60; the leading part may be any size.
+    """
+    raw = str(value).strip()
+    if not raw:
+        raise ClipHunterError("El tiempo no puede estar vacío.")
+
+    parts = raw.split(":")
+    if len(parts) > 3 or any(not _TIME_PART_RE.match(part) for part in parts):
+        raise ClipHunterError(
+            f"Formato de tiempo inválido: {value!r}. Usa SS, MM:SS o HH:MM:SS."
+        )
+
+    numbers = [float(part) for part in parts]
+    if len(parts) >= 2 and numbers[-1] >= 60:
+        raise ClipHunterError(
+            f"Formato de tiempo inválido: {value!r}. Los segundos deben ser < 60."
+        )
+    if len(parts) == 3 and numbers[1] >= 60:
+        raise ClipHunterError(
+            f"Formato de tiempo inválido: {value!r}. Los minutos deben ser < 60."
+        )
+
+    if len(parts) == 3:
+        hours, minutes, seconds = numbers
+    elif len(parts) == 2:
+        hours = 0.0
+        minutes, seconds = numbers
+    else:
+        hours, minutes, seconds = 0.0, 0.0, numbers[0]
+    return hours * 3600.0 + minutes * 60.0 + seconds
+
+
 def format_hms(seconds: float) -> str:
     """Format seconds as ``H:MM:SS`` (or ``MM:SS`` under an hour)."""
     seconds = max(0.0, float(seconds))

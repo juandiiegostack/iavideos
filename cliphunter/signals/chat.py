@@ -38,11 +38,20 @@ def analyze_chat(
     messages: list[ChatMessage] | None,
     duration: float,
     config: Config,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
 ) -> SignalSeries:
-    """Build the chat signal on the shared analysis grid."""
+    """Build the chat signal on the shared analysis grid.
+
+    ``start``/``end`` limit the analyzed section while keeping message
+    timestamps relative to the original video.
+    """
     window = config.f("analysis.window", 10.0)
     hop = config.f("analysis.hop", 2.0)
-    times = analysis_times(duration, hop)
+    range_start = max(0.0, float(start))
+    range_end = float(duration) if end is None else min(float(duration), float(end))
+    times = analysis_times(max(0.0, range_end - range_start), hop, offset=range_start)
 
     if not messages:
         return SignalSeries(
@@ -51,7 +60,11 @@ def analyze_chat(
         )
 
     min_messages = config.i("chat.min_messages", 20)
-    usable = [m for m in messages if 0 <= m.t <= duration + window and m.text]
+    usable = [
+        m
+        for m in messages
+        if range_start - window <= m.t <= range_end + window and m.text
+    ]
     if len(usable) < min_messages:
         return SignalSeries(
             "chat", times, np.zeros(len(times), dtype=np.float32), False,

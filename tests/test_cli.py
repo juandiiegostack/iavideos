@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -20,6 +22,9 @@ def test_parser_defaults() -> None:
     assert args.subtitles is None
     assert args.llm is None
     assert args.max_duration == 5.0
+    assert args.start is None
+    assert args.end is None
+    assert args.query is None
 
 
 def test_parser_rejects_conflicting_signal_flags() -> None:
@@ -110,6 +115,60 @@ def test_main_rejects_live_with_local_file() -> None:
     with pytest.raises(SystemExit) as info:
         main(["--file", "a.mp4", "--live"])
     assert info.value.code == 2
+
+
+def test_parser_parses_time_range_formats() -> None:
+    args = build_parser().parse_args(["--file", "video.mp4", "--start", "75", "--end", "300"])
+    assert args.start == 75.0
+    assert args.end == 300.0
+
+    args = build_parser().parse_args(["--file", "video.mp4", "--start", "1:30", "--end", "2:00:30"])
+    assert args.start == 90.0
+    assert args.end == 7230.0
+
+
+def test_parser_rejects_invalid_time_format() -> None:
+    with pytest.raises(SystemExit) as info:
+        build_parser().parse_args(["--file", "video.mp4", "--start", "1:70:00"])
+    assert info.value.code == 2
+    with pytest.raises(SystemExit) as info:
+        build_parser().parse_args(["--file", "video.mp4", "--end", "abc"])
+    assert info.value.code == 2
+
+
+def test_main_rejects_start_not_before_end() -> None:
+    with pytest.raises(SystemExit) as info:
+        main(["--file", "a.mp4", "--start", "30", "--end", "30"])
+    assert info.value.code == 2
+    with pytest.raises(SystemExit) as info:
+        main(["--file", "a.mp4", "--start", "45", "--end", "30"])
+    assert info.value.code == 2
+
+
+def test_main_rejects_empty_query() -> None:
+    with pytest.raises(SystemExit) as info:
+        main(["--file", "a.mp4", "--query", "   "])
+    assert info.value.code == 2
+
+
+def test_main_passes_range_and_query_to_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import cliphunter.cli as cli_module
+
+    captured: dict[str, Any] = {}
+
+    def fake_run(options: Any, config: Any) -> Any:
+        captured["options"] = options
+        captured["config"] = config
+        return SimpleNamespace(manifest_path=None)
+
+    monkeypatch.setattr(cli_module, "run", fake_run)
+    code = main(["--file", "a.mp4", "--start", "30", "--end", "90", "--query", "ganga"])
+    assert code == 0
+    assert captured["options"].start == 30.0
+    assert captured["options"].end == 90.0
+    assert captured["options"].query == "ganga"
 
 
 def test_main_version(capsys: pytest.CaptureFixture[str]) -> None:

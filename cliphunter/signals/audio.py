@@ -22,39 +22,51 @@ def extract_audio(
     config: Config,
     *,
     force: bool = False,
+    start: float | None = None,
+    end: float | None = None,
 ) -> Path:
-    """Decode the source to mono 16 kHz PCM WAV, cached under the source key."""
+    """Decode the source to mono 16 kHz PCM WAV, cached under the source key.
+
+    When ``start``/``end`` are provided only that section is decoded and the
+    cache filename includes the range.
+    """
     media_path = Path(media) if isinstance(media, (str, Path)) else Path(media.path)
     sample_rate = config.i("audio.sample_rate", 16000)
-    target = cache.path(key, f"audio_{sample_rate}.wav")
+    partial = start is not None or end is not None
+    if partial:
+        tag = f"_r{int(round((start or 0.0) * 1000))}-{int(round((end or 0.0) * 1000))}"
+    else:
+        tag = ""
+    target = cache.path(key, f"audio_{sample_rate}{tag}.wav")
     if target.is_file() and target.stat().st_size > 1024 and not force:
         LOG.debug("Audio en caché: %s", target)
         return target
 
-    LOG.info("Extrayendo audio (%d Hz mono)…", sample_rate)
+    LOG.info(
+        "Extrayendo audio%s (%d Hz mono)…",
+        f" de {start:.1f}-{end:.1f}s" if partial else "",
+        sample_rate,
+    )
+    cmd = [ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-y"]
+    if start is not None:
+        cmd += ["-ss", f"{max(0.0, float(start)):.3f}"]
+    cmd += ["-i", str(media_path.resolve())]
+    if end is not None:
+        cmd += ["-t", f"{max(0.05, float(end) - float(start or 0.0)):.3f}"]
+    cmd += [
+        "-vn",
+        "-sn",
+        "-dn",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-c:a",
+        "pcm_s16le",
+        str(target),
+    ]
     try:
-        run_capture(
-            [
-                ffmpeg_path(),
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                str(media_path.resolve()),
-                "-vn",
-                "-sn",
-                "-dn",
-                "-ac",
-                "1",
-                "-ar",
-                str(sample_rate),
-                "-c:a",
-                "pcm_s16le",
-                str(target),
-            ],
-            timeout=3600,
-        )
+        run_capture(cmd, timeout=3600)
     except Exception as exc:  # noqa: BLE001
         raise ClipHunterError(
             "No se pudo extraer el audio (¿el video no tiene pista de audio?).\n"
@@ -106,11 +118,21 @@ def analyze_audio(
     wav_path: str | Path,
     duration: float,
     config: Config,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
 ) -> SignalSeries:
-    """Compute RMS, sudden-loudness, scream and laughter features."""
+    """Compute RMS, sudden-loudness, scream and laughter features.
+
+    ``start``/``end`` select the analyzed section while all timestamps stay
+    relative to the original video.
+    """
     window = config.f("analysis.window", 10.0)
     hop = config.f("analysis.hop", 2.0)
-    times = analysis_times(duration, hop)
+    range_start = max(0.0, float(start))
+    range_end = float(duration) if end is None else min(float(duration), float(end))
+    span = max(0.0, range_end - range_start)
+    times = analysis_times(span, hop, offset=range_start)
     sample_rate = config.i("audio.sample_rate", 16000)
 
     audio, rate = read_wav_mono(Path(wav_path))
@@ -154,7 +176,10 @@ def analyze_audio(
 
     db_floor = config.f("audio.db_floor", -60.0)
     rms_db = np.clip(rms_db, db_floor, 3.0)
-    fine_times = (np.arange(num_frames, dtype=np.float64) * hop_len + frame_len / 2.0) / rate
+    fine_times = (
+        (np.arange(num_frames, dtype=np.float64) * hop_len + frame_len / 2.0) / rate
+        + range_start
+    )
     smooth_db = moving_average(rms_db, max(1, int(round(0.3 * rate / hop_len))))
     local_mean = moving_average(smooth_db, max(1, int(round(3.0 * rate / hop_len))))
     novelty = np.maximum(0.0, smooth_db - local_mean)
@@ -188,7 +213,8 @@ def analyze_audio(
 
     # Coarse envelope used to snap clip cuts to quiet points.
     env_rate = 10
-    env_times = np.arange(0.0, max(duration, fine_times[-1]) + 1e-6, 1.0 / env_rate)
+    env_end = max(range_end, float(fine_times[-1])) if len(fine_times) else range_end
+    env_times = np.arange(range_start, env_end + 1e-6, 1.0 / env_rate)
     env_db = np.interp(env_times, fine_times, smooth_db, left=db_floor, right=db_floor)
 
     LOG.info(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,6 +48,7 @@ from .models import AnalysisResult, CandidateClip, MediaInfo, SignalSeries, Tran
 from .scorer import candidate_snapshot, score_and_select
 from .signals.audio import analyze_audio, extract_audio
 from .signals.chat import analyze_chat
+from .signals.query import analyze_query
 from .signals.transcript import (
     analyze_transcript,
     load_cached_transcript,
@@ -72,6 +74,9 @@ class RunOptions:
     file: str | None = None
     live: bool = False
     max_duration: float = 5.0
+    start: float | None = None
+    end: float | None = None
+    query: str | None = None
     chat_file: str | None = None
     cookies_from_browser: str | None = None
     cookie_file: str | None = None
@@ -185,6 +190,27 @@ def _save_signals_cache(
     cache.save_json(key, filename, payload)
 
 
+def _resolve_analysis_range(options: RunOptions, duration: float) -> tuple[float, float]:
+    """Validate --start/--end against the real media duration."""
+    start = max(0.0, float(options.start or 0.0))
+    end = float(duration) if options.end is None else float(options.end)
+    if start >= float(duration) - 1e-6:
+        raise ClipHunterError(
+            f"--start ({format_hms(start)}) está fuera del video "
+            f"(duración {format_hms(duration)})."
+        )
+    if end <= start + 1e-6:
+        raise ClipHunterError("--start debe ser menor que --end.")
+    if end > float(duration) + 1e-6:
+        LOG.warning(
+            "--end (%s) supera la duración del video (%s); se usará el final.",
+            format_hms(end),
+            format_hms(duration),
+        )
+        end = float(duration)
+    return start, end
+
+
 def _resolve_source(
     options: RunOptions,
     config: Config,
@@ -294,24 +320,50 @@ def _analyze(
     config: Config,
     cache: Cache,
     progress: Progress,
+    *,
+    range_start: float = 0.0,
+    range_end: float | None = None,
+    query_text: str | None = None,
 ) -> tuple[dict[str, SignalSeries], TranscriptData | None, dict[str, Any]]:
     """Acquire optional inputs and compute (or load) the analysis signals."""
     chat_enabled = config.b("analysis.signals.chat", True)
     audio_enabled = config.b("analysis.signals.audio", True)
     transcript_enabled = config.b("analysis.signals.transcript", True)
     subtitles_enabled = config.b("subtitles.enabled", False)
+    query_enabled = config.b("analysis.signals.query", True)
+    query_text = (query_text or options.query or "").strip() or None
+    range_start = max(0.0, float(range_start))
+    range_end = float(media.duration) if range_end is None else min(float(media.duration), float(range_end))
+    partial = range_start > 1e-6 or range_end < float(media.duration) - 1e-6
+    range_tag = (
+        f"r{int(round(range_start * 1000))}-{int(round(range_end * 1000))}"
+        if partial
+        else ""
+    )
 
     if not media.has_audio:
-        if audio_enabled or transcript_enabled or subtitles_enabled:
-            LOG.warning("El video no tiene audio: se desactivan audio, transcripción y subtítulos.")
+        if audio_enabled or transcript_enabled or subtitles_enabled or query_text:
+            LOG.warning(
+                "El video no tiene audio: se desactivan audio, transcripción y subtítulos."
+            )
         audio_enabled = False
         transcript_enabled = False
         subtitles_enabled = False
+        if not query_text:
+            query_enabled = False
 
-    need_transcript = transcript_enabled or subtitles_enabled
+    need_transcript = transcript_enabled or subtitles_enabled or query_enabled or bool(query_text)
     need_audio = audio_enabled or need_transcript
 
     analysis_hash = config.hash("analysis", "weights", "chat", "audio", "transcript")
+    if query_text:
+        analysis_hash += "_" + hashlib.sha1(
+            query_text.encode("utf-8")
+        ).hexdigest()[:8]
+        if config.b("llm.enabled", False):
+            analysis_hash += "l"
+    if range_tag:
+        analysis_hash += "_" + range_tag
     cache_name = f"signals_{analysis_hash}.json"
     signals: dict[str, SignalSeries] | None = None
     transcript: TranscriptData | None = None
@@ -320,18 +372,31 @@ def _analyze(
         if signals:
             LOG.info("Análisis en caché: se reutilizan %d señales.", len(signals))
             if need_transcript:
-                transcript = load_cached_transcript(cache, key, config)
+                transcript = load_cached_transcript(cache, key, config, range_tag)
                 if transcript:
                     LOG.info(
                         "Transcripción en caché lista para %s.",
-                        "subtítulos" if subtitles_enabled else "contexto",
+                        "búsqueda" if query_text else ("subtítulos" if subtitles_enabled else "contexto"),
                     )
+                else:
+                    LOG.info(
+                        "No hay transcripción en caché para esta ejecución; "
+                        "se recalcula el análisis."
+                    )
+                    signals = None
 
     if signals is None:
         wav: Path | None = None
         if need_audio:
             try:
-                wav = extract_audio(media, cache, key, config)
+                wav = extract_audio(
+                    media,
+                    cache,
+                    key,
+                    config,
+                    start=range_start if partial else None,
+                    end=range_end if partial else None,
+                )
             except ClipHunterError as exc:
                 LOG.warning("No se pudo extraer audio: %s", exc)
                 audio_enabled = False
@@ -366,9 +431,12 @@ def _analyze(
                     cache,
                     key,
                     config,
-                    media.duration,
+                    range_end - range_start if partial else media.duration,
                     on_progress=_TaskProgress(progress, task),
                     force=options.force,
+                    start=range_start if partial else 0.0,
+                    end=range_end if partial else None,
+                    tag=range_tag,
                 )
             except TranscriptionError as exc:
                 LOG.warning("Transcripción no disponible: %s", exc)
@@ -393,14 +461,32 @@ def _analyze(
 
         signals = {}
         if chat_enabled:
-            signals["chat"] = analyze_chat(messages, media.duration, config)
+            signals["chat"] = analyze_chat(
+                messages, media.duration, config, start=range_start, end=range_end
+            )
         if audio_enabled and wav is not None:
             try:
-                signals["audio"] = analyze_audio(wav, media.duration, config)
+                signals["audio"] = analyze_audio(
+                    wav, media.duration, config, start=range_start, end=range_end
+                )
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("La señal de audio falló: %s", exc)
         if transcript_enabled and transcript is not None:
-            signals["transcript"] = analyze_transcript(transcript, media.duration, config)
+            signals["transcript"] = analyze_transcript(
+                transcript, media.duration, config, start=range_start, end=range_end
+            )
+
+        if query_text and query_enabled and transcript is not None:
+            llm_client = LLMClient(config) if config.b("llm.enabled", False) else None
+            signals["query"] = analyze_query(
+                transcript,
+                media.duration,
+                config,
+                query_text,
+                start=range_start,
+                end=range_end,
+                llm_client=llm_client,
+            )
 
         _save_signals_cache(cache, key, cache_name, signals, media.duration)
 
@@ -413,6 +499,7 @@ def _analyze(
         "audio_enabled": audio_enabled,
         "transcript_enabled": transcript_enabled,
         "subtitles_enabled": subtitles_enabled,
+        "query_enabled": query_enabled,
     }
     return signals, transcript, meta
 
@@ -465,12 +552,23 @@ def run(options: RunOptions, config: Config) -> PipelineResult:
             media.resolution,
         )
 
+        range_start, range_end = _resolve_analysis_range(options, media.duration)
         signals, transcript, meta = _analyze(
-            media, key, spec, options, config, cache, progress
+            media,
+            key,
+            spec,
+            options,
+            config,
+            cache,
+            progress,
+            range_start=range_start,
+            range_end=range_end,
         )
         LOG.info("Señales disponibles: %s", ", ".join(signals) or "ninguna")
 
-        result = score_and_select(signals, transcript, media.duration, config)
+        result = score_and_select(
+            signals, transcript, media.duration, config, start=range_start, end=range_end
+        )
 
         if config.b("llm.enabled", False) and result.clips:
             try:

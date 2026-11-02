@@ -53,8 +53,8 @@ def _resolve_device(config: Config) -> tuple[str, str]:
     return device, compute
 
 
-def transcript_cache_name(config: Config) -> str:
-    """Cache filename derived from the Whisper model and decoding settings."""
+def transcript_cache_name(config: Config, tag: str = "") -> str:
+    """Cache filename derived from the Whisper model, decoding settings and range."""
     model_name = str(config.get("transcript.model", "small"))
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", model_name)
     payload = {
@@ -65,18 +65,20 @@ def transcript_cache_name(config: Config) -> str:
         "condition_on_previous_text": config.b(
             "transcript.condition_on_previous_text", False
         ),
+        "range": tag,
     }
     digest = hashlib.sha1(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()[:8]
-    return f"transcript_{safe}_{digest}.json"
+    suffix = f"_{tag}" if tag else ""
+    return f"transcript_{safe}{suffix}_{digest}.json"
 
 
 def load_cached_transcript(
-    cache: Cache, key: str, config: Config
+    cache: Cache, key: str, config: Config, tag: str = ""
 ) -> TranscriptData | None:
     """Load a cached transcript without importing or running Whisper."""
-    cached = cache.load_json(key, transcript_cache_name(config))
+    cached = cache.load_json(key, transcript_cache_name(config, tag))
     if not cached:
         return None
     try:
@@ -117,11 +119,18 @@ def transcribe(
     *,
     on_progress: ProgressFn | None = None,
     force: bool = False,
+    start: float = 0.0,
+    end: float | None = None,
+    tag: str = "",
 ) -> TranscriptData:
-    """Transcribe with faster-whisper and cache word-level timestamps."""
-    cache_name = transcript_cache_name(config)
+    """Transcribe with faster-whisper and cache word-level timestamps.
+
+    When the audio is a section of a longer video, ``start`` offsets every word
+    and segment back to original-video time and ``tag`` isolates its cache file.
+    """
+    cache_name = transcript_cache_name(config, tag)
     if not force:
-        transcript = load_cached_transcript(cache, key, config)
+        transcript = load_cached_transcript(cache, key, config, tag)
         if transcript:
             LOG.info(
                 "Transcripción en caché: %d palabras (%s)",
@@ -158,19 +167,22 @@ def transcribe(
             words: list[Word] = []
             segments: list[TranscriptSegment] = []
             detected = getattr(info, "language", None) or language
+            offset = max(0.0, float(start))
             for segment in segments_iter:
                 text = (segment.text or "").strip()
                 if text:
                     segments.append(
-                        TranscriptSegment(float(segment.start), float(segment.end), text)
+                        TranscriptSegment(
+                            offset + float(segment.start), offset + float(segment.end), text
+                        )
                     )
                 for word in segment.words or []:
                     token = (word.word or "").strip()
                     if token:
                         words.append(
                             Word(
-                                start=float(word.start),
-                                end=float(word.end),
+                                start=offset + float(word.start),
+                                end=offset + float(word.end),
                                 text=token,
                                 probability=float(getattr(word, "probability", 0.0) or 0.0),
                             )
@@ -241,11 +253,19 @@ def analyze_transcript(
     transcript: TranscriptData | None,
     duration: float,
     config: Config,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
 ) -> SignalSeries:
-    """Score keyword hits, speech-rate bursts and exclamations."""
+    """Score keyword hits, speech-rate bursts and exclamations.
+
+    ``start``/``end`` restrict the analysis while keeping timestamps absolute.
+    """
     window = config.f("analysis.window", 10.0)
     hop = config.f("analysis.hop", 2.0)
-    times = analysis_times(duration, hop)
+    range_start = max(0.0, float(start))
+    range_end = float(duration) if end is None else min(float(duration), float(end))
+    times = analysis_times(max(0.0, range_end - range_start), hop, offset=range_start)
 
     if transcript is None or not transcript.words:
         return SignalSeries(
@@ -253,7 +273,16 @@ def analyze_transcript(
             "sin transcripción",
         )
 
-    words = [w for w in transcript.words if w.end >= 0]
+    words = [
+        w
+        for w in transcript.words
+        if w.end >= range_start and w.start <= range_end
+    ]
+    if not words:
+        return SignalSeries(
+            "transcript", times, np.zeros(len(times), dtype=np.float32), False,
+            "sin palabras en el rango",
+        )
     tokens = [_norm_token(w.text) for w in words]
     by_len = _keyword_map(config)
     max_parts = max(by_len) if by_len else 1

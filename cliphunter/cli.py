@@ -11,7 +11,7 @@ from . import __version__
 from .config import load_config
 from .exceptions import ClipHunterError
 from .pipeline import RunOptions, run
-from .utils import LOG, console, setup_logging
+from .utils import LOG, console, parse_timestamp, setup_logging
 
 EXAMPLES = """\
 Ejemplos:
@@ -20,7 +20,17 @@ Ejemplos:
   python cliphunter.py "https://twitch.tv/canal" --live --max-duration 20 --clips 5
   python cliphunter.py --file partida.mp4 --chat-file chat.json --no-audio
   python cliphunter.py "https://kick.com/video/..." --clips 3 --dry-run
+  python cliphunter.py "https://twitch.tv/videos/123456789" --start 120 --end 300 --clips 5
+  python cliphunter.py "https://twitch.tv/videos/123456789" --query "de dónde nace la ganga" --clips 3
 """
+
+
+def _seconds(value: str) -> float:
+    """Parse ``SS``, ``MM:SS`` o ``HH:MM:SS`` for --start/--end."""
+    try:
+        return parse_timestamp(value)
+    except ClipHunterError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +64,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--post-roll", type=float, help="Segundos después del pico (defecto 4).")
     parser.add_argument("--window", type=float, help="Ventana de análisis en segundos (defecto 10).")
     parser.add_argument("--hop", type=float, help="Paso entre ventanas en segundos (defecto 2).")
+    parser.add_argument(
+        "--start",
+        type=_seconds,
+        metavar="SEG",
+        help="Inicio del análisis: SS, MM:SS o HH:MM:SS (defecto 0).",
+    )
+    parser.add_argument(
+        "--end",
+        type=_seconds,
+        metavar="SEG",
+        help="Fin del análisis: SS, MM:SS o HH:MM:SS (defecto: duración del video).",
+    )
+    parser.add_argument(
+        "--query",
+        metavar="TEXTO",
+        help='Tema a buscar en la transcripción (ej: --query "de dónde nace la ganga").',
+    )
     parser.add_argument("--out", metavar="DIR", help="Carpeta de salida (defecto clips/).")
     parser.add_argument("--config", metavar="YAML", help="Archivo de configuración alternativo.")
 
@@ -192,6 +219,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--live solo funciona con una URL de directo, no con --file.")
     if args.max_duration < 0:
         parser.error("--max-duration no puede ser negativo (0 = hasta Ctrl+C).")
+    if args.start is not None and args.end is not None and args.start >= args.end:
+        parser.error("--start debe ser menor que --end.")
+    if args.query is not None and not args.query.strip():
+        parser.error("--query no puede estar vacío.")
     if args.clips is not None and args.clips < 1:
         parser.error("--clips debe ser >= 1.")
     if args.workers is not None and args.workers < 1:
@@ -204,6 +235,9 @@ def main(argv: list[str] | None = None) -> int:
             file=args.file,
             live=args.live,
             max_duration=args.max_duration,
+            start=args.start,
+            end=args.end,
+            query=args.query,
             chat_file=args.chat_file,
             cookies_from_browser=args.cookies_from_browser,
             cookie_file=args.cookies,

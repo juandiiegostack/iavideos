@@ -8,11 +8,27 @@ analysis:
     chat: true
     audio: true
     transcript: true
+    query: true       # tema (--query) + transcript: activa la señal de búsqueda
 
 weights:
   chat: 0.40
   audio: 0.35
   transcript: 0.25
+
+# Peso de la señal de búsqueda por tema dentro de la puntuación combinada.
+query_weight: 0.20
+
+query:
+  window: 20.0            # segundos de contexto alrededor de un hit para puntuar
+  pause_threshold: 0.35   # segundos de silencio que separan dos frases distintas
+  min_score: 0.15         # relevancia mínima (heurística o LLM) para fijar un ancla
+  merge_distance: 6.0     # segundos: hits cercanos se consideran el mismo clip
+  target_duration: 35.0  # duración objetivo del clip expandido desde un hit
+  min_duration: 30.0      # duración mínima del clip de búsqueda
+  max_duration: 40.0      # duración máxima del clip de búsqueda
+  snap_window: 4.0        # tolerancia al ajustar cortes a pausas naturales
+  llm_max_passages: 40    # fragmentos máximos enviados al LLM por tanda
+  llm_batch: 10           # fragmentos por request al LLM
 
 chat:
   min_messages: 20

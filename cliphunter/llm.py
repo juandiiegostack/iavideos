@@ -170,3 +170,91 @@ class LLMClient:
             clip.index = index
         LOG.info("LLM aplicado a %d clips.", matched)
         return clips
+
+    def score_query(
+        self, query: str, passages: list[dict[str, Any]]
+    ) -> dict[str, float]:
+        """Score transcript passages by semantic relevance to ``query`` (0-10)."""
+        self.validate()
+        if not passages:
+            return {}
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        batch_size = max(1, self.config.i("query.llm_batch", 10))
+        system = (
+            "Eres un buscador semántico de clips de directos. "
+            "Puntúa del 0 al 10 cuánto habla cada fragmento del tema solicitado. "
+            "Ten en cuenta sinónimos, paráfrasis y contexto, no solo palabras exactas. "
+            "0 = no tiene nada que ver; 10 = habla directamente del tema. "
+            "Devuelve SOLO JSON válido, sin markdown, con esta forma exacta: "
+            '{"results":[{"id":"p1","score":8}]}.'
+        )
+
+        scores: dict[str, float] = {}
+        for offset in range(0, len(passages), batch_size):
+            batch = passages[offset : offset + batch_size]
+            rows = [
+                {
+                    "id": str(passage.get("id", "")),
+                    "inicio": round(float(passage.get("start", 0.0)), 1),
+                    "fin": round(float(passage.get("end", 0.0)), 1),
+                    "texto": str(passage.get("text", ""))[:700],
+                }
+                for passage in batch
+            ]
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Tema buscado: {query}\n"
+                            f"Fragmentos:\n{json.dumps(rows, ensure_ascii=False, indent=1)}"
+                        ),
+                    },
+                ],
+                "temperature": min(self.temperature, 0.2),
+                "max_tokens": 1200,
+            }
+            LOG.info(
+                "Consultando al LLM (%s) por relevancia de %d fragmentos…",
+                self.model,
+                len(batch),
+            )
+            try:
+                response = requests.post(
+                    self._endpoint(), headers=headers, json=payload, timeout=self.timeout
+                )
+            except requests.RequestException as exc:
+                raise LLMError(f"No se pudo conectar con el LLM: {exc}") from exc
+            if response.status_code >= 400:
+                raise LLMError(
+                    f"El LLM respondió HTTP {response.status_code}: {response.text[:400]}"
+                )
+            try:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise LLMError(
+                    f"Respuesta inesperada del LLM: {response.text[:400]}"
+                ) from exc
+
+            parsed = self._parse_content(content)
+            entries = parsed.get("results") or parsed.get("passages") or []
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                passage_id = str(entry.get("id", "")).strip()
+                if not passage_id:
+                    continue
+                try:
+                    value = float(entry.get("score", 0))
+                except (TypeError, ValueError):
+                    continue
+                scores[passage_id] = max(0.0, min(10.0, value))
+        return scores
