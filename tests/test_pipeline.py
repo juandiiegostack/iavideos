@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,13 @@ from cliphunter.cache import Cache
 from cliphunter.config import load_config
 from cliphunter.downloader import RemoteSource, SourceSpec
 from cliphunter.exceptions import ClipHunterError, SourceError
-from cliphunter.pipeline import RunOptions, _resolve_analysis_range, _resolve_source
+from cliphunter.models import CandidateClip, MediaInfo
+from cliphunter.pipeline import (
+    RunOptions,
+    _resolve_analysis_range,
+    _resolve_source,
+    _write_manifest,
+)
 
 
 class DummyProgress:
@@ -58,6 +65,91 @@ def test_live_mode_offline_channel_reports_offline(
     cache = Cache(tmp_path / "cache", enabled=False)
     with pytest.raises(LiveOfflineError):
         _resolve_source(options, load_config(), cache, DummyProgress())
+
+
+def _media() -> MediaInfo:
+    return MediaInfo(
+        path=Path("video.mp4"),
+        duration=40.0,
+        width=640,
+        height=360,
+        fps=25,
+        has_audio=True,
+    )
+
+
+def _entry(start: float, end: float, name: str) -> dict:
+    return {
+        "index": 1,
+        "file": name,
+        "subtitle_file": None,
+        "start": start,
+        "end": end,
+        "duration": end - start,
+        "peak": 10.0,
+        "score": 0.5,
+        "signals": {},
+        "reasons": [],
+        "title": "Titulo",
+        "transcript": "",
+        "llm_score": None,
+        "llm_reason": "",
+    }
+
+
+def test_write_manifest_accumulates_previous_clips(tmp_path: Path) -> None:
+    output_dir = tmp_path / "clips"
+    output_dir.mkdir()
+    (output_dir / "clips.json").write_text(
+        json.dumps(
+            {
+                "tool": "ClipHunter",
+                "version": "0.1.0",
+                "source": {},
+                "settings": {},
+                "clips": [_entry(5.0, 20.0, "clip_001_old.mp4")],
+                "errors": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest_path = _write_manifest(output_dir, _media(), [], load_config(), {}, [])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(payload["clips"]) == 1
+
+    new_clip = CandidateClip(
+        index=2,
+        start=30.0,
+        end=39.0,
+        peak=32.0,
+        score=0.9,
+        title="Nuevo",
+        file="clip_002_nuevo.mp4",
+    )
+    manifest_path = _write_manifest(output_dir, _media(), [new_clip], load_config(), {}, [])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(payload["clips"]) == 2
+    assert payload["clips"][0]["file"] == "clip_001_old.mp4"
+    assert payload["clips"][1]["file"] == "clip_002_nuevo.mp4"
+
+
+def test_write_manifest_does_not_duplicate_same_clip_twice(tmp_path: Path) -> None:
+    output_dir = tmp_path / "clips"
+    output_dir.mkdir()
+    new_clip = CandidateClip(
+        index=2,
+        start=30.0,
+        end=39.0,
+        peak=32.0,
+        score=0.9,
+        title="Nuevo",
+        file="clip_002_nuevo.mp4",
+    )
+    _write_manifest(output_dir, _media(), [new_clip], load_config(), {}, [])
+    _write_manifest(output_dir, _media(), [new_clip], load_config(), {}, [])
+    payload = json.loads((output_dir / "clips.json").read_text(encoding="utf-8"))
+    assert len(payload["clips"]) == 1
 
 
 def test_resolve_analysis_range_rejects_start_not_before_end() -> None:

@@ -171,10 +171,23 @@ def cut_segment(
 
 
 def clip_filename(clip: CandidateClip, out_dir: Path, index: int | None = None) -> Path:
-    """Build a stable, readable ``clip_001_title-slug.mp4`` filename."""
+    """Build a stable, readable ``clip_001_title-slug.mp4`` filename.
+
+    When the target already exists a numeric suffix is added
+    (``clip_001_title-slug_2.mp4``) so previous clips are never overwritten.
+    """
     number = clip.index if index is None else index
     slug = slugify(clip.title or f"momento {number}", 40)
-    return out_dir / f"clip_{number:03d}_{slug}.mp4"
+    target = out_dir / f"clip_{number:03d}_{slug}.mp4"
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = 2
+    while True:
+        candidate = out_dir / f"{stem}_{suffix}{target.suffix}"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
 
 
 def export_clip(

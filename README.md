@@ -61,6 +61,10 @@ eligió cada momento (score, señales, motivos, título y transcripción).
 - **Exportación**: recorte preciso con ffmpeg, H.264/AAC, `+faststart`.
   - Vertical 9:16 (1080×1920) con fondo desenfocado o recorte centrado.
   - Subtítulos ASS quemados, palabra a palabra o por frases.
+- **Biblioteca acumulativa**: los clips siempre se guardan en la carpeta de salida
+  (por defecto `clips/`, configurable con `paths.output_dir`) y `clips.json` **acumula**
+  los clips de todas las ejecuciones. Si un archivo con el mismo nombre ya existe, se
+  añade un sufijo numérico (`clip_001_titulo_2.mp4`) sin pisar el anterior.
 - **LLM opcional** (cualquier API compatible con OpenAI) para reordenar y titular.
 - **Caché** de descargas, audio, chat, transcripción y señales.
 - **Errores accionables** y barras de progreso.
@@ -310,6 +314,9 @@ python cliphunter.py "https://twitch.tv/videos/123456789" --cookies cookies.txt
    - Se recorta con re-encode (preciso, no keyframe) y se compone el vertical.
    - Se generan subtítulos ASS con la palabra activa resaltada.
    - Se escribe `clips.json` con el desglose de señales y motivos.
+   - Los clips se guardan en la carpeta de salida (por defecto `clips/`), con nombre
+     estable y sufijo numérico (`clip_001_titulo_2.mp4`) si el archivo ya existe, y
+     `clips.json` se acumula entre ejecuciones (no se sobrescribe).
 
 ---
 
@@ -629,6 +636,11 @@ Ejemplo simplificado:
 - `signals` contiene el valor normalizado (0–1) de cada señal dentro del clip.
 - `errors` lista los clips que fallaron al exportar, sin abortar el resto.
 - Con `--dry-run` se escribe `analysis.json` con `times`, `scores` y los candidatos.
+
+> `clips.json` **acumula** los clips de todas las ejecuciones (se añaden los nuevos al
+> historial existente, deduplicando por fuente y rango) en lugar de sobrescribirse.
+> Los archivos con el mismo nombre van a una versión con sufijo numérico
+> (`clip_001_titulo_2.mp4`) y nunca se pisan.
 
 ---
 

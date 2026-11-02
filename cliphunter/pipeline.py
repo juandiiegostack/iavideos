@@ -63,6 +63,7 @@ from .utils import (
     ensure_media_tools,
     format_hms,
     probe_media,
+    read_json,
 )
 
 
@@ -681,6 +682,49 @@ def run(options: RunOptions, config: Config) -> PipelineResult:
         return PipelineResult(media, result.clips, output_dir, manifest_path, key)
 
 
+def _entry_key(entry: dict[str, Any]) -> tuple[str, float, float]:
+    """Identity of a clip entry: ``(source file, start, end)``."""
+    source = entry.get("source")
+    source_file = ""
+    if isinstance(source, dict):
+        source_file = str(source.get("file") or "")
+    elif source:
+        source_file = str(source)
+    try:
+        return (
+            source_file,
+            round(float(entry.get("start") or 0.0), 2),
+            round(float(entry.get("end") or 0.0), 2),
+        )
+    except (TypeError, ValueError):
+        return ("", 0.0, 0.0)
+
+
+def _previous_clips(output_dir: Path) -> list[dict[str, Any]]:
+    """Read clips from an existing ``clips.json`` so runs accumulate over time."""
+    path = output_dir / "clips.json"
+    if not path.is_file():
+        return []
+    try:
+        data = read_json(path)
+    except (OSError, ValueError):
+        return []
+    entries = data.get("clips") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, float]] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = _entry_key(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(entry)
+    return result
+
+
 def _write_manifest(
     output_dir: Path,
     media: MediaInfo,
@@ -689,6 +733,26 @@ def _write_manifest(
     meta: dict[str, Any],
     errors: list[dict[str, str]],
 ) -> Path:
+    """Write (and accumulate) the ``clips.json`` manifest for this run."""
+
+    accumulated: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, float]] = set()
+    previous = _previous_clips(output_dir)
+    for entry in previous:
+        key = _entry_key(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        accumulated.append(entry)
+    for clip in clips:
+        entry = dict(clip.to_dict())
+        entry["source"] = media.to_dict()
+        key = _entry_key(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        accumulated.append(entry)
+
     payload: dict[str, Any] = {
         "tool": "ClipHunter",
         "version": __version__,
@@ -713,7 +777,7 @@ def _write_manifest(
             },
             "weights": config.section("weights"),
         },
-        "clips": [clip.to_dict() for clip in clips],
+        "clips": accumulated,
         "errors": errors,
     }
     path = output_dir / "clips.json"

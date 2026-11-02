@@ -58,6 +58,18 @@ def test_clip_filename_slugifies_unicode_title() -> None:
     assert "que-locura" in target.name
 
 
+def test_clip_filename_adds_numeric_suffix_on_collision(tmp_path: Path) -> None:
+    clip = CandidateClip(index=1, start=0.0, end=15.0, peak=1.0, score=0.5, title="Que locura")
+    first = clip_filename(clip, tmp_path)
+    assert first.name == "clip_001_que-locura.mp4"
+    first.write_bytes(b"previous")
+    second = clip_filename(clip, tmp_path)
+    assert second.name == "clip_001_que-locura_2.mp4"
+    second.write_bytes(b"previous")
+    third = clip_filename(clip, tmp_path)
+    assert third.name == "clip_001_que-locura_3.mp4"
+
+
 def test_cut_segment_exports_horizontal_clip(tmp_path: Path, tiny_video: Path) -> None:
     config = load_config()
     output = tmp_path / "clips" / "clip.mp4"
